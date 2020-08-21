@@ -66,6 +66,9 @@ typedef uint8_t clipped_t;
 typedef int8_t weight_t;
 #endif
 
+#define LOOP_16(f) f(0);f(1);f(2);f(3);f(4);f(5);f(6);f(7);\
+    f(8);f(9);f(10);f(11);f(12);f(13);f(14);f(15)
+
 // Version of the evaluation file
 static const uint32_t NnueVersion = 0x7AF32F16u;
 
@@ -422,7 +425,12 @@ INLINE void refresh_accumulator(const Position *pos)
 
   for (unsigned c = 0; c < 2; c++) {
     memcpy(accumulator->accumulation[c], ft_biases, kHalfDimensions * sizeof(int16_t));
-
+#ifdef USE_AVX2
+    __m256i *accumulation = (__m256i *)&accumulator->accumulation[c][0];
+#define TMP(j) __m256i acc_##j = _mm256_load_si256(&accumulation[j])
+    LOOP_16(TMP);
+#undef TMP
+#endif
     for (size_t k = 0; k < activeIndices[c].size; k++) {
       unsigned index = activeIndices[c].values[k];
       unsigned offset = kHalfDimensions * index;
@@ -435,11 +443,12 @@ INLINE void refresh_accumulator(const Position *pos)
         accumulation[j] = _mm512_add_epi16(accumulation[j], column[j]);
 
 #elif defined(USE_AVX2)
-      __m256i *accumulation = (__m256i *)accumulator->accumulation[c];
-      __m256i *column = (__m256i *)&ft_weights[offset];
+      __m256i *column = (__m256i *)(&ft_weights[offset]);
       const unsigned numChunks = kHalfDimensions / 16;
-      for (unsigned j = 0; j < numChunks; j++)
-        accumulation[j] = _mm256_add_epi16(accumulation[j], column[j]);
+      static_assert(numChunks == 16);
+#define TMP(j) acc_##j = _mm256_add_epi16(acc_##j, column[j])
+      LOOP_16(TMP);
+#undef TMP
 
 #elif defined(USE_SSE2)
       __m128i *accumulation = (__m128i *)accumulator->accumulation[c];
@@ -468,13 +477,18 @@ INLINE void refresh_accumulator(const Position *pos)
 
 #endif
     }
+#ifdef USE_AVX2
+#define TMP(j) _mm256_store_si256(&accumulation[j], acc_##j)
+    LOOP_16(TMP);
+#undef TMP
+#endif
   }
 
   accumulator->computedAccumulation = true;
 }
 
 // Calculate cumulative value using difference calculation if possible
-static bool update_accumulator_if_possible(const Position *pos)
+INLINE bool update_accumulator_if_possible(const Position *pos)
 {
   Accumulator *accumulator = &(pos->st->accumulator);
   if (accumulator->computedAccumulation)
@@ -498,7 +512,9 @@ static bool update_accumulator_if_possible(const Position *pos)
 #elif defined(USE_AVX2)
     const unsigned numChunks = kHalfDimensions / 16;
     __m256i *accumulation = (__m256i *)accumulator->accumulation[c];
-
+#define TMP(j) __m256i acc_##j;
+    LOOP_16(TMP);
+#undef TMP
 #elif defined(USE_SSE2)
     const unsigned numChunks = kHalfDimensions / 8;
     __m128i *accumulation = (__m128i *)accumulator->accumulation[c];
@@ -513,13 +529,26 @@ static bool update_accumulator_if_possible(const Position *pos)
 #endif
 
     if (reset[c]) {
+#ifdef USE_AVX2
+      __m256i *ft_b_ymm = (__m256i *) ft_biases;
+#define TMP(j) acc_##j = ft_b_ymm[j]
+	    LOOP_16(TMP);
+#undef TMP
+#else
       memcpy(&(accumulator->accumulation[c]), ft_biases,
           kHalfDimensions * sizeof(int16_t));
+#endif
     } else {
+#ifdef USE_AVX2
+      __m256i *prev_acc_ymm = (__m256i *) &(prevAccumulator->accumulation[c]);
+#define TMP(j) acc_##j = prev_acc_ymm[j]
+      LOOP_16(TMP);
+#undef TMP
+#else
       memcpy(&(accumulator->accumulation[c]),
           &(prevAccumulator->accumulation[c]),
           kHalfDimensions * sizeof(int16_t));
-
+#endif
       // Difference calculation for the deactivated features
       for (unsigned k = 0; k < removed_indices[c].size; k++) {
         unsigned index = removed_indices[c].values[k];
@@ -532,9 +561,9 @@ static bool update_accumulator_if_possible(const Position *pos)
 
 #elif defined(USE_AVX2)
         __m256i *column = (__m256i *)&ft_weights[offset];
-        for (unsigned j = 0; j < numChunks; j++)
-          accumulation[j] = _mm256_sub_epi16(accumulation[j], column[j]);
-
+#define TMP(j) acc_##j = _mm256_sub_epi16(acc_##j, column[j])
+	LOOP_16(TMP);
+#undef TMP
 #elif defined(USE_SSE2)
         __m128i *column = (__m128i *)&ft_weights[offset];
         for (unsigned j = 0; j < numChunks; j++)
@@ -569,9 +598,9 @@ static bool update_accumulator_if_possible(const Position *pos)
 
 #elif defined(USE_AVX2)
       __m256i *column = (__m256i *)&ft_weights[offset];
-      for (unsigned j = 0; j < numChunks; j++)
-        accumulation[j] = _mm256_add_epi16(accumulation[j], column[j]);
-
+#define TMP(j) acc_##j = _mm256_add_epi16(acc_##j, column[j])
+      LOOP_16(TMP);
+#undef TMP
 #elif defined(USE_SSE2)
       __m128i *column = (__m128i *)&ft_weights[offset];
       for (unsigned j = 0; j < numChunks; j++)
@@ -593,6 +622,11 @@ static bool update_accumulator_if_possible(const Position *pos)
 
 #endif
     }
+#ifdef USE_AVX2
+#define TMP(j) accumulation[j] = acc_##j
+    LOOP_16(TMP);
+#undef TMP
+#endif
   }
 
   accumulator->computedAccumulation = true;
@@ -609,24 +643,29 @@ INLINE void transform(const Position *pos, clipped_t *output)
 
 #if defined(USE_AVX2)
   const unsigned numChunks = kHalfDimensions / 32;
+  const unsigned kTileHeight = Is64Bit ? 256 : 128;
   const __m256i kZero = _mm256_setzero_si256();
 
 #elif defined(USE_SSE41)
   const unsigned numChunks = kHalfDimensions / 16;
+  const unsigned kTileHeight = Is64Bit ? 128 : 64;
   const __m128i kZero = _mm_setzero_si128();
 
 #elif defined(USE_SSSE3)
   const unsigned numChunks = kHalfDimensions / 16;
+  const unsigned kTileHeight = Is64Bit ? 128 : 64;
   const __m128i k0x80s = _mm_set1_epi8(-128);
 
 #elif defined(USE_SSE2)
   const unsigned numChunks = kHalfDimensions / 8;
+  const unsigned kTileHeight = Is64Bit ? 128 : 64;
   const __m128i k0x7f80 = _mm_set1_epi16(0x7f80);
 
 #elif defined(USE_MMX)
   const unsigned numChunks = kHalfDimensions / 4;
+  const unsigned kTileHeight = 32;
   const __m64 k0x7f80 = _mm_set1_pi16(0x7f80);
-
+  
 #elif defined(USE_NEON)
   const unsigned numChunks = kHalfDimensions / 8;
   const int8x8_t kZero = {0};
@@ -637,6 +676,7 @@ INLINE void transform(const Position *pos, clipped_t *output)
   for (unsigned p = 0; p < 2; p++) {
     const unsigned offset = kHalfDimensions * p;
 
+//    for (unsigned k = 0; k < 
 #if defined(USE_AVX2)
     __m256i *out = (__m256i *)&output[offset];
     for (unsigned i = 0; i < numChunks; i++) {
