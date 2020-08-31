@@ -549,6 +549,7 @@ INLINE void affine_txfm(uint8_t *input, void *output, unsigned inDims,
     out_1 = _mm256_add_epi32(out_1, _mm256_unpackhi_epi16(prod, signs));
 #endif
     prod = _mm256_maddubs_epi16(mul, _mm256_unpackhi_epi8(first, second));
+#ifndef NEW_CODE
     out_2 = _mm256_add_epi32(out_2, _mm256_cvtepi16_epi32(_mm256_castsi256_si128(prod)));
     out_3 = _mm256_add_epi32(out_3, _mm256_cvtepi16_epi32(_mm256_castsi256_si128(_mm256_permute4x64_epi64(prod, 0xE))));
 #else
@@ -1103,8 +1104,10 @@ void permute_weights_and_biases(int8_t *weights, int32_t *biases,
 {
   __m256i *w = (__m256i *)weights;
   __m256i permutation = _mm256_set_epi32(7, 3, 5, 1, 6, 2, 4, 0);
+#ifndef NEW_CODE
   for (unsigned i = 0; i < numDims; i++)
     w[i] = _mm256_permutevar8x32_epi32(w[i], permutation);
+#endif
 
   __m128i *b = (__m128i *)biases;
   __m128i tmp[8];
@@ -1152,10 +1155,8 @@ bool load_eval_file(const char *evalFile)
   read_weights(output_weights, 32, 1 , F);
 
 #if defined(TRANSPOSE) && defined(USE_AVX2)
-#ifndef NEW_CODE
   permute_weights_and_biases(hidden1_weights, hidden1_biases, 512);
   permute_weights_and_biases(hidden2_weights, hidden2_biases, 32);
-#endif
 #endif
 
   return true;
