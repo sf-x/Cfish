@@ -1044,6 +1044,11 @@ Value nnue_evaluate(const Position *pos)
   memcpy(input_mask2, input_mask, FtOutDims / 8);
   affine_txfm(B(input), B(hidden1_out), FtOutDims, 32,
       hidden1_biases, hidden1_weights, input_mask2, hidden1_mask, true);
+#ifdef PRINT_NNUE
+  {int checksum = 0;
+  for (unsigned i = 0; i< 32; i++) {if (i<32) printf("%d ",B(hidden1_out)[i]);
+    checksum+=B(hidden1_out)[i];} printf("%d\n",checksum);}
+#endif
 
   uint64_t hidden1_mask2[1];
   memcpy(hidden1_mask2, hidden1_mask, 8);
